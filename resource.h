@@ -10,6 +10,7 @@
 #define IDC_EDIT_SRC_FILE               1000
 #define IDC_BUTTON_BROWSE               1001
 #define IDC_BUTTON_PLAY                 1002
+#define IDC_BUTTON_SNAPSHOT             1003
 
 // Next default values for new objects
 // 

@@ -31,11 +31,18 @@ protected:
 	afx_msg void OnPaint();
 	afx_msg HCURSOR OnQueryDragIcon();
 	DECLARE_MESSAGE_MAP()
+
+private:
+	CString mSrcFile;
+
+	// Utilities methods
+	int _FindVideoStreamIndex(const char* filename, int& codecId);
+
 public:
 	afx_msg void OnBnClickedButtonBrowse();
 	afx_msg void OnDestroy();
-private:
-	CString mSrcFile;
+
 public:
 	afx_msg void OnBnClickedButtonPlay();
+	afx_msg void OnBnClickedButtonSnapshot();
 };
