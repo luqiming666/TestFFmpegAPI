@@ -9,6 +9,7 @@
 #include "afxdialogex.h"
 #include <iostream>
 #include "UMiscUtils.h"
+#include "UFFmpegUtils.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -18,7 +19,7 @@ extern "C" {
 #include "libavcodec/avcodec.h"
 #include "libswscale/swscale.h"
 #include "libavutil/fifo.h"
-//#include "libavdevice/avdevice.h"
+#include "libavutil/imgutils.h"
 
 #ifdef __cplusplus
 }
@@ -270,198 +271,173 @@ fail:
 	av_free(is);
 }
 
-#define INBUF_SIZE 4096
+static int video_frame_count = 0;
 
-static int decode_video(AVCodecContext* dec_ctx, AVFrame* frame, AVPacket* pkt)
+static int decode_packet(AVCodecContext* dec, const AVPacket* pkt, AVFrame* frame)
 {
-	int ret = avcodec_send_packet(dec_ctx, pkt);
+	int ret = 0;
+	
+	// submit the packet to the decoder
+	ret = avcodec_send_packet(dec, pkt);
 	if (ret < 0) {
-		std::cout << "Error sending a packet for decoding... code: " << ret << std::endl;
-		if (ret == AVERROR(EAGAIN)) {
-			std::cout << "EAGAIN" << std::endl;
-		}
-		else if (ret == AVERROR(EINVAL)) {
-			std::cout << "EINVAL" << std::endl;
-		}
-		else if (ret == AVERROR(ENOMEM)) {
-			std::cout << "ENOMEM" << std::endl;
-		}
-		else {
-			std::cout << "Unknown..." << std::endl;
-		}
+		// av_err2str(ret)
+		std::cout << "Error submitting a packet for decoding" << std::endl;
 		return ret;
 	}
 
+	// get all the available frames from the decoder
 	while (ret >= 0) {
-		ret = avcodec_receive_frame(dec_ctx, frame);
-		if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
-			return 0;
-		else if (ret < 0) {
+		ret = avcodec_receive_frame(dec, frame);
+		if (ret < 0) {
+			// those two return values are special and mean there is no output
+			// frame available, but there were no errors during decoding
+			if (ret == AVERROR_EOF || ret == AVERROR(EAGAIN))
+				return 0;
+
 			std::cout << "Error during decoding" << std::endl;
 			return ret;
 		}
 
-		//printf("saving frame %3"PRId64"\n", dec_ctx->frame_num);
-		//fflush(stdout);
+		// write the frame data to output file
+		if (dec->codec->type == AVMEDIA_TYPE_VIDEO) {
+			std::cout << "video_frame n : " << video_frame_count++ << std::endl;
+			if (video_frame_count > 125 && video_frame_count < 129) { // test: to save 3 frames
+				AVFrame* rgbFrame = UFFmpegUtils::Convert(frame, AV_PIX_FMT_BGR24);
+				if (rgbFrame) {
+					char szFilename[50];
+					sprintf_s(szFilename, sizeof(szFilename), "pic%d.bmp", video_frame_count);
+					UFFmpegUtils::SaveRGB24AsBMP(rgbFrame, szFilename);
 
-		/* the picture is allocated by the decoder. no need to
-		   free it */
-		char buf[100];
-		snprintf(buf, sizeof(buf), "Pic-%d.bmp", dec_ctx->frame_num);
-		UMiscUtils::SaveFrameToBMP(frame->data[0], frame->width, frame->height, 24, buf);
-		//pgm_save(frame->data[0], frame->linesize[0],
-		//	frame->width, frame->height, buf);
+					av_frame_free(&rgbFrame);
+				}
+			}
+		}
+
+		av_frame_unref(frame);
+	}
+
+	return ret;
+}
+
+static int open_codec_context(int* stream_idx, AVCodecContext** dec_ctx, AVFormatContext* fmt_ctx, enum AVMediaType type)
+{
+	int ret, stream_index;
+	AVStream* st;
+	const AVCodec* dec = NULL;
+
+	ret = av_find_best_stream(fmt_ctx, type, -1, -1, NULL, 0);
+	if (ret < 0) {
+		std::cout << "Could not find " << av_get_media_type_string(type) << " stream in input file" << std::endl;
+		return ret;
+	}
+	else {
+		stream_index = ret;
+		st = fmt_ctx->streams[stream_index];
+
+		// find decoder for the stream
+		dec = avcodec_find_decoder(st->codecpar->codec_id);
+		if (!dec) {
+			std::cout << "Failed to find the codec" << std::endl;
+			return AVERROR(EINVAL);
+		}
+
+		// Allocate a codec context for the decoder
+		*dec_ctx = avcodec_alloc_context3(dec);
+		if (!*dec_ctx) {
+			std::cout << "Failed to allocate the codec context" << std::endl;
+			return AVERROR(ENOMEM);
+		}
+
+		// Copy codec parameters from input stream to output codec context
+		if ((ret = avcodec_parameters_to_context(*dec_ctx, st->codecpar)) < 0) {
+			std::cout << "Failed to copy codec parameters to decoder context" << std::endl;
+			return ret;
+		}
+
+		// Init the decoders
+		if ((ret = avcodec_open2(*dec_ctx, dec, NULL)) < 0) {
+			std::cout << "Failed to open the codec: " << av_get_media_type_string(type) << std::endl;
+			return ret;
+		}
+		*stream_idx = stream_index;
 	}
 
 	return 0;
 }
 
-// 参考 FFmpeg\doc\examples\decode_video.c
+// 参考 FFmpeg\doc\examples\demux_decode.c
 void CTestFFmpegAPIDlg::OnBnClickedButtonSnapshot()
 {
-	mSrcFile = "D:\\Media\\bear.wmv";
+	//mSrcFile = "D:\\Media\\Gucci.mp4";
+	if (mSrcFile.IsEmpty()) return;
 
-	const AVCodec* codec;
-	AVCodecParserContext* parser = NULL;
-	AVCodecContext* c = NULL;
-	FILE* f = NULL;
-	AVFrame* frame = NULL;
-	uint8_t inbuf[INBUF_SIZE + AV_INPUT_BUFFER_PADDING_SIZE];
-	uint8_t* data = NULL;
-	size_t   data_size;
-	int ret;
-	int eof;
-	AVPacket* pkt;
+	int ret = 0;
+	static AVFormatContext* fmt_ctx = NULL;
+	static AVCodecContext* video_dec_ctx = NULL;
+	static AVStream* video_stream = NULL, * audio_stream = NULL;
 
-	int codec_id = 0;
-	int videoStream = _FindVideoStreamIndex((LPCTSTR)mSrcFile, codec_id);
-	if (videoStream == -1) {
-		std::cout << "Failed to find a video stream in the source file." << std::endl;
-		goto fail;
+	static int video_stream_idx = -1;
+	static AVFrame* frame = NULL;
+	static AVPacket* pkt = NULL;
+
+	// open input file, and allocate format context
+	if (avformat_open_input(&fmt_ctx, (LPCTSTR)mSrcFile, NULL, NULL) < 0) {
+		std::cout << "Could not open source file" << std::endl;
+		goto Exit;
 	}
 
-	pkt = av_packet_alloc();
-	if (!pkt)
-		goto fail;
-
-	/* set end of buffer to 0 (this ensures that no overreading happens for damaged MPEG streams) */
-	memset(inbuf + INBUF_SIZE, 0, AV_INPUT_BUFFER_PADDING_SIZE);
-
-	/* find a specific video decoder */
-	codec = avcodec_find_decoder((AVCodecID)codec_id);
-	if (!codec) {
-		std::cout << "Codec not found" << std::endl;
-		goto fail;
+	// retrieve stream information
+	if (avformat_find_stream_info(fmt_ctx, NULL) < 0) {
+		std::cout << "Could not find stream information" << std::endl;
+		goto Exit;
 	}
 
-	parser = av_parser_init(codec->id);
-	if (!parser) {
-		std::cout << "Parser not found" << std::endl;
-		goto fail;
+	if (open_codec_context(&video_stream_idx, &video_dec_ctx, fmt_ctx, AVMEDIA_TYPE_VIDEO) >= 0) {
+		video_stream = fmt_ctx->streams[video_stream_idx];
+		//std::cout << "Image Size: " << video_dec_ctx->width << " x " << video_dec_ctx->height << ", Pixel Format: " << av_get_pix_fmt_name(video_dec_ctx->pix_fmt) << std::endl;
 	}
 
-	c = avcodec_alloc_context3(codec);
-	if (!c) {
-		std::cout << "Could not allocate video codec context" << std::endl;
-		goto fail;
-	}
-
-	/* For some codecs, such as msmpeg4 and mpeg4, width and height
-	   MUST be initialized there because this information is not
-	   available in the bitstream. */
-
-	   /* Copy codec parameters from input stream to output codec context */
-	if ((ret = avcodec_parameters_to_context(c, st->codecpar)) < 0) {
-		fprintf(stderr, "Failed to copy %s codec parameters to decoder context\n",
-			av_get_media_type_string(type));
-		return ret;
-	}
-
-	   /* open it */
-	if (avcodec_open2(c, codec, NULL) < 0) {
-		std::cout << "Could not open codec" << std::endl;
-		goto fail;
-	}
-
-	ret = fopen_s(&f, (LPCTSTR)mSrcFile, "rb");
-	if (ret != 0) {
-		std::cout << "Could not open the source file" << std::endl;
-		goto fail;
-	}
+	// dump input information to stderr
+	av_dump_format(fmt_ctx, 0, (LPCTSTR)mSrcFile, 0);
 
 	frame = av_frame_alloc();
 	if (!frame) {
-		std::cout << "Could not allocate video frame" << std::endl;
-		goto fail;
+		std::cout << "Could not allocate frame" << std::endl;
+		ret = AVERROR(ENOMEM);
+		goto Exit;
 	}
 
-	do {
-		/* read raw data from the input file */
-		data_size = fread(inbuf, 1, INBUF_SIZE, f);
-		if (ferror(f))
+	pkt = av_packet_alloc();
+	if (!pkt) {
+		std::cout << "Could not allocate packet" << std::endl;
+		ret = AVERROR(ENOMEM);
+		goto Exit;
+	}
+
+	// read frames from the file
+	while (av_read_frame(fmt_ctx, pkt) >= 0) {
+		// check if the packet belongs to a stream we are interested in, otherwise
+		// skip it
+		if (pkt->stream_index == video_stream_idx) {
+			ret = decode_packet(video_dec_ctx, pkt, frame);
+		}
+		//else if (pkt->stream_index == audio_stream_idx)
+		//	ret = decode_packet(audio_dec_ctx, pkt, frame);
+
+		av_packet_unref(pkt);
+		if (ret < 0)
 			break;
-		eof = !data_size;
+	}
 
-		/* use the parser to split the data into frames */
-		data = inbuf;
-		while (data_size > 0 || eof) {
-			ret = av_parser_parse2(parser, c, &pkt->data, &pkt->size,
-				data, data_size, AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0);
-			if (ret < 0) {
-				std::cout << "Error while parsing" << std::endl;
-				goto fail;
-			}
-			data += ret;
-			data_size -= ret;
+	// flush the decoders
+	if (video_dec_ctx)
+		decode_packet(video_dec_ctx, NULL, frame);
 
-			if (pkt->size && pkt->stream_index == videoStream)
-				decode_video(c, frame, pkt);
-			else if (eof)
-				break;
-		}
-	} while (!eof);
+	std::cout << "Demuxing succeeded." << std::endl;
 
-	/* flush the decoder */
-	decode_video(c, frame, NULL);
-
-fail:
-	if (f) fclose(f);
-	av_parser_close(parser);
-	avcodec_free_context(&c);
-	av_frame_free(&frame);
+Exit:
+	avcodec_free_context(&video_dec_ctx);
+	avformat_close_input(&fmt_ctx);
 	av_packet_free(&pkt);
-}
-
-int CTestFFmpegAPIDlg::_FindVideoStreamIndex(const char* filename, int& codecId)
-{
-	int videoStream = -1;
-
-	// Open video file
-	AVFormatContext* pFormatCtx = NULL;
-	if (avformat_open_input(&pFormatCtx, filename, NULL, NULL) == 0) {
-		// Dump information about the source file
-		av_dump_format(pFormatCtx, 0, filename, false);
-
-		// Retrieve stream information
-		if (avformat_find_stream_info(pFormatCtx, NULL) == 0) {
-			// Find the first video stream
-			for (int i = 0; i < pFormatCtx->nb_streams; i++) {
-				if (pFormatCtx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-					videoStream = i;
-					codecId = pFormatCtx->streams[i]->codecpar->codec_id;
-					break;
-				}
-			}
-		}
-	}
-	else {
-		std::cout << "Could not open the source file." << std::endl;
-	}
-	
-	// Close the video file
-	if (pFormatCtx) {
-		avformat_close_input(&pFormatCtx);
-	}
-
-	return videoStream;
+	av_frame_free(&frame);
 }

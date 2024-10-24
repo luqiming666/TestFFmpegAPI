@@ -1,6 +1,6 @@
 # TestFFmpegAPI
 A testing app which invokes FFmpeg APIs (instead of the complied ffmpeg.exe)  
-Tested with FFmpeg v7.1
+Tested with FFmpeg v7.1 in 2024.  
 
 **How to run?**
 1. go to https://ffmpeg.org/download.html#build-windows  

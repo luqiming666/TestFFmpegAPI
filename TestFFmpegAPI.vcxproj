@@ -198,6 +198,7 @@
     <ClInclude Include="targetver.h" />
     <ClInclude Include="TestFFmpegAPI.h" />
     <ClInclude Include="TestFFmpegAPIDlg.h" />
+    <ClInclude Include="UFFmpegUtils.h" />
     <ClInclude Include="UMiscUtils.h" />
   </ItemGroup>
   <ItemGroup>
@@ -209,6 +210,7 @@
     </ClCompile>
     <ClCompile Include="TestFFmpegAPI.cpp" />
     <ClCompile Include="TestFFmpegAPIDlg.cpp" />
+    <ClCompile Include="UFFmpegUtils.cpp" />
     <ClCompile Include="UMiscUtils.cpp" />
   </ItemGroup>
   <ItemGroup>

@@ -36,7 +36,6 @@ private:
 	CString mSrcFile;
 
 	// Utilities methods
-	int _FindVideoStreamIndex(const char* filename, int& codecId);
 
 public:
 	afx_msg void OnBnClickedButtonBrowse();
